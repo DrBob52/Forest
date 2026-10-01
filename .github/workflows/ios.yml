@@ -1,0 +1,92 @@
+name: iOS simulator build
+
+on:
+  push:
+    paths:
+      - 'ios/**'
+      - 'index.html'
+      - 'tools/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/ios.yml'
+  pull_request:
+    paths:
+      - 'ios/**'
+      - 'index.html'
+      - 'tools/**'
+  workflow_dispatch:
+
+jobs:
+  simulator:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Rebuild the app's web bundle
+        run: |
+          npm ci
+          npm run build:ios
+          if ! git diff --quiet -- ios/Understory/Web/index.html; then
+            echo "::warning::ios/Understory/Web/index.html is out of date with index.html. Run npm run build:ios and commit the result."
+          fi
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      - name: Build for the iOS Simulator
+        run: |
+          xcodebuild \
+            -project ios/Understory.xcodeproj \
+            -scheme Understory \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tee xcodebuild.log
+          status=${PIPESTATUS[0]}
+          echo "---- warnings and errors ----"
+          grep -E "(error|warning): " xcodebuild.log | grep -v "^ld: warning" | sort -u || true
+          exit $status
+
+      - name: Launch in a simulator and take screenshots
+        run: |
+          mkdir -p results
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          phones = [d for runtime, ds in devices.items() if "iOS" in runtime for d in ds if d["name"].startswith("iPhone")]
+          print(phones[-1]["udid"])')
+          xcrun simctl list devices | grep "$UDID" | tee results/device.txt
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl install "$UDID" build/Build/Products/Debug-iphonesimulator/Understory.app
+          xcrun simctl launch "$UDID" io.github.drbob52.understory | tee results/launch.txt
+          sleep 40
+          xcrun simctl io "$UDID" screenshot results/launch-40s.png
+          sleep 20
+          xcrun simctl io "$UDID" screenshot results/launch-60s.png
+          if xcrun simctl spawn "$UDID" launchctl list | grep -q "io.github.drbob52.understory"; then
+            echo "App is still running after 60 seconds" | tee results/status.txt
+          else
+            echo "::error::The app is not running 60 seconds after launch" | tee results/status.txt
+            exit 1
+          fi
+          xcrun simctl spawn "$UDID" log show --last 3m --style compact \
+            --predicate 'process == "Understory" OR (process == "com.apple.WebKit.WebContent" AND messageType == error)' \
+            > results/app.log 2>&1 || true
+          tail -n 60 results/app.log
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulator-results
+          path: |
+            results/
+            xcodebuild.log
