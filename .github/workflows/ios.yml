@@ -36,7 +36,9 @@ jobs:
           fi
 
       - name: Xcode version
-        run: xcodebuild -version
+        run: |
+          xcodebuild -version
+          xcrun simctl list runtimes | grep iOS
 
       - name: Build for the iOS Simulator
         run: |
@@ -81,6 +83,14 @@ jobs:
             --predicate 'process == "Understory" OR (process == "com.apple.WebKit.WebContent" AND messageType == error)' \
             > results/app.log 2>&1 || true
           tail -n 60 results/app.log
+
+      - name: Print a small preview of the screenshot
+        run: |
+          # A compact copy in the log lets you check the result without downloading the artifact.
+          sips -Z 640 -s format jpeg -s formatOptions 55 results/launch-60s.png --out results/preview.jpg > /dev/null
+          echo "PREVIEW_JPEG_BASE64_BEGIN"
+          base64 -i results/preview.jpg | fold -w 76
+          echo "PREVIEW_JPEG_BASE64_END"
 
       - name: Upload results
         if: always()
